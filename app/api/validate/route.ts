@@ -24,7 +24,7 @@ ${EXPENSE_POLICY_TEXT}
 
 כל הפרה שאתה מזהה (גם אם היא לא משנה את הפסיקה הסופית) צריכה להופיע במערך violations עם נימוק ספציפי וברור בעברית.
 
-החזר אך ורק JSON תקין התואם בדיוק לסכימה הזו, ללא טקסט עוטף, ללא הסברים, ללא Markdown, ללא code fences:
+קריטי: התשובה שלך חייבת להתחיל ב-{ ולהסתיים ב-} בלבד. אסור שהתגובה תכלול שום טקסט לפני ה-{ הפותח (כגון "אני אבדוק..." או הסברים), שום טקסט אחרי ה-} הסוגר, ושום code fence או Markdown. החזר אך ורק את אובייקט ה-JSON התואם בדיוק לסכימה הזו:
 
 {
   "vendor": "string | null",
@@ -49,8 +49,44 @@ ${EXPENSE_POLICY_TEXT}
 function extractJson(text: string): any {
   const trimmed = text.trim();
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const candidate = fenced ? fenced[1] : trimmed;
-  return JSON.parse(candidate);
+  if (fenced) return JSON.parse(fenced[1]);
+
+  // Model may prepend/append explanatory text around the JSON object —
+  // fall back to the outermost {...} span.
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error("לא נמצא JSON בתשובת המודל");
+  }
+  return JSON.parse(trimmed.slice(start, end + 1));
+}
+
+function fallbackResult(rawText: string): ExtractedReceipt {
+  return {
+    vendor: null,
+    businessNumber: null,
+    invoiceNumber: null,
+    employee: null,
+    department: null,
+    date: null,
+    category: "unknown",
+    amountBeforeVat: null,
+    vatAmount: null,
+    vatRate: null,
+    total: null,
+    paymentMethod: null,
+    participants: null,
+    businessPurpose: null,
+    verdict: "needs_review",
+    violations: [
+      {
+        rule: "כשל בחילוץ אוטומטי",
+        detail: "המודל לא החזיר תשובה תקינה לקבלה זו ולכן היא מחייבת בדיקה אנושית מלאה.",
+        severity: "high",
+      },
+    ],
+    notes: rawText.slice(0, 500),
+  };
 }
 
 function applyDeterministicChecks(data: ExtractedReceipt): ExtractedReceipt {
@@ -155,7 +191,16 @@ export async function POST(req: NextRequest) {
       throw new Error("לא התקבלה תשובת טקסט מהמודל.");
     }
 
-    const parsed = extractJson(textBlock.text) as ExtractedReceipt;
+    const rawText = textBlock.text;
+
+    let parsed: ExtractedReceipt;
+    try {
+      parsed = extractJson(rawText) as ExtractedReceipt;
+    } catch (parseErr) {
+      console.error("JSON parse failure, falling back to needs_review:", parseErr, rawText);
+      return NextResponse.json(fallbackResult(rawText));
+    }
+
     const finalResult = applyDeterministicChecks(parsed);
 
     return NextResponse.json(finalResult);
